@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=kunpack
+GenericName=Smart Archive Unpacker
+GenericName[es]=Descompresor Inteligente & Auto-limpiador
+Comment=Extract archives smartly preventing nested folders and auto-cleaning to trash
+Comment[es]=Descomprime archivos inteligentemente evitando carpetas anidadas y enviando el original a la papelera
+Exec=kunpack %U
+Icon=archive-extract
+Terminal=false
+Categories=Utility;Archiving;
+MimeType=application/zip;application/x-tar;application/x-compressed-tar;application/x-bzip-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-7z-compressed;application/x-rar;application/vnd.rar;application/gzip;application/x-bzip2;application/x-xz;application/x-zstd;application/x-iso9660-image;
+StartupNotify=true
+X-KDE-StartupNotify=true

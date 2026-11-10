@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/zip;application/x-tar;application/x-compressed-tar;application/x-bzip-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-7z-compressed;application/x-rar;application/vnd.rar;application/gzip;application/x-bzip2;application/x-xz;application/x-zstd;application/x-iso9660-image;
+X-KDE-Protocols=file
+Actions=smartExtractTrash;smartExtractKeep;
+X-KDE-Submenu=Extraer con kunpack
+X-KDE-Submenu[en]=Extract with kunpack
+
+[Desktop Action smartExtractTrash]
+Name=Extraer inteligentemente y limpiar (a Papelera)
+Name[en]=Extract smartly & clean up (to Trash)
+Icon=archive-extract
+Exec=kunpack %U
+
+[Desktop Action smartExtractKeep]
+Name=Extraer inteligentemente (conservar original)
+Name[en]=Extract smartly (keep original)
+Icon=package-x-generic
+Exec=kunpack --keep %U

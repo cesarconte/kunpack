@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Cesar <yugurta@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""
+kunpack: Descompresión Inteligente & Auto-limpieza (The Unarchiver para KDE Plasma 6)
+
+Características:
+  1. Extracción inteligente: evita anidamiento duplicado y previene bombas de ficheros.
+  2. Limpieza de metadatos basura (__MACOSX, .DS_Store, Thumbs.db).
+  3. Auto-limpieza segura: envía el archivo comprimido a la Papelera de Plasma tras descomprimir.
+  4. Integración nativa con Dolphin y notificaciones interactivas de KDE Plasma 6.
+"""
+
+import sys
+import os
+import shutil
+import subprocess
+import argparse
+import time
+from pathlib import Path
+
+VERSION = "1.0.0"
+JUNK_NAMES = {"__MACOSX", ".DS_Store", "desktop.ini", "Thumbs.db"}
+
+
+def run_command(cmd, check=True):
+    """Ejecuta un comando del sistema de forma segura."""
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+
+
+def clean_junk_entries(target_path: Path):
+    """Elimina metadatos residuales como __MACOSX y .DS_Store."""
+    if not target_path.exists():
+        return
+    if target_path.is_file():
+        return
+
+    for root, dirs, files in os.walk(target_path, topdown=False):
+        for f in files:
+            if f in JUNK_NAMES:
+                try:
+                    os.unlink(os.path.join(root, f))
+                except OSError:
+                    pass
+        for d in dirs:
+            if d in JUNK_NAMES:
+                try:
+                    shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                except OSError:
+                    pass
+
+
+def flatten_if_single_child(dir_path: Path) -> Path:
+    """
+    Si una carpeta creada contiene únicamente otra subcarpeta y ningún fichero
+    (ej. debido a la presencia previa de __MACOSX o empaquetado redundante),
+    mueve el contenido un nivel arriba y elimina el contenedor innecesario.
+    """
+    if not dir_path.is_dir():
+        return dir_path
+
+    entries = [e for e in dir_path.iterdir() if e.name not in JUNK_NAMES]
+    if len(entries) == 1 and entries[0].is_dir():
+        inner = entries[0]
+        parent = dir_path.parent
+        target_name = inner.name
+        destination = parent / target_name
+
+        # Si el destino no colisiona con otro existente, promocionamos
+        if not destination.exists():
+            temp_name = parent / f".kunpack_tmp_{int(time.time()*1000)}"
+            inner.rename(temp_name)
+            try:
+                dir_path.rmdir()
+            except OSError:
+                shutil.rmtree(dir_path, ignore_errors=True)
+            temp_name.rename(destination)
+            return destination
+
+    return dir_path
+
+
+def move_to_trash(file_path: Path) -> bool:
+    """Envía un archivo a la papelera nativa de KDE / FreeDesktop."""
+    abs_path = str(file_path.resolve())
+    
+    # 1. Intentar con gio trash
+    try:
+        res = subprocess.run(["gio", "trash", abs_path], capture_output=True, text=True)
+        if res.returncode == 0:
+            return True
+    except FileNotFoundError:
+        pass
+
+    # 2. Intentar con kioclient move trash:/
+    try:
+        res = subprocess.run(["kioclient", "move", abs_path, "trash:/"], capture_output=True, text=True)
+        if res.returncode == 0:
+            return True
+    except FileNotFoundError:
+        pass
+
+    return False
+
+
+def notify_user(title: str, message: str, open_path: Path = None, is_quiet: bool = False):
+    """Envía una notificación al centro de control de KDE Plasma."""
+    if is_quiet:
+        return
+
+    cmd = [
+        "notify-send",
+        "-a", "kunpack",
+        "-i", "archive-extract",
+        title,
+        message
+    ]
+
+    if open_path and open_path.exists():
+        cmd.extend(["--action=open=📂 Abrir carpeta"])
+        # Lanzar en segundo plano para no bloquear si espera interacción
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            # En un hilo ligero o proceso desacoplado comprobamos si hace clic en "open"
+            def handle_action():
+                out, _ = proc.communicate()
+                if out and "open" in out:
+                    subprocess.Popen(["xdg-open", str(open_path)])
+            
+            import threading
+            threading.Thread(target=handle_action, daemon=True).start()
+            return
+        except Exception:
+            pass
+
+    try:
+        subprocess.Popen(cmd)
+    except Exception:
+        pass
+
+
+def extract_archive(archive_path: Path, dest_dir: Path) -> Path:
+    """
+    Descomprime el archivo usando el motor de Ark con autosubfolder,
+    o herramientas CLI estándar en caso de ausencia.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    initial_entries = set(dest_dir.iterdir())
+
+    # Estrategia principal: ark en modo batch con detección inteligente de subcarpeta
+    ark_bin = shutil.which("ark")
+    extracted_ok = False
+
+    if ark_bin:
+        cmd = [ark_bin, "-b", "-a", "-o", str(dest_dir), str(archive_path)]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            extracted_ok = True
+
+    # Respaldo con herramientas nativas si ark falla o no está instalado
+    if not extracted_ok:
+        lower_name = archive_path.name.lower()
+        if lower_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tar")):
+            res = subprocess.run(["tar", "-xf", str(archive_path), "-C", str(dest_dir)], capture_output=True)
+            if res.returncode == 0:
+                extracted_ok = True
+        elif lower_name.endswith(".zip") and shutil.which("unzip"):
+            res = subprocess.run(["unzip", "-q", "-o", str(archive_path), "-d", str(dest_dir)], capture_output=True)
+            if res.returncode == 0:
+                extracted_ok = True
+        elif shutil.which("7z"):
+            res = subprocess.run(["7z", "x", f"-o{dest_dir}", "-y", str(archive_path)], capture_output=True)
+            if res.returncode == 0:
+                extracted_ok = True
+
+    if not extracted_ok:
+        raise RuntimeError(f"No se pudo descomprimir el archivo '{archive_path.name}'.")
+
+    # Identificar las entradas generadas
+    after_entries = set(dest_dir.iterdir())
+    new_entries = list(after_entries - initial_entries)
+
+    # Limpiar basura en los nuevos directorios creados
+    for entry in new_entries:
+        clean_junk_entries(entry)
+
+    # Si se creó una sola carpeta contenedora, comprobamos si contiene a su vez una sola carpeta
+    # para evitar el síndrome de carpetas anidadas provocado por __MACOSX o compresión redundante
+    final_target = dest_dir
+    if len(new_entries) == 1:
+        single_entry = new_entries[0]
+        final_target = flatten_if_single_child(single_entry)
+    elif len(new_entries) > 1:
+        final_target = dest_dir
+
+    return final_target
+
+
+def unpack_file(archive_path: Path, dest_dir: Path, keep_original: bool, open_after: bool, quiet: bool):
+    """Procesa un único archivo comprimido."""
+    if not archive_path.is_file():
+        print(f"Error: '{archive_path}' no es un archivo válido.", file=sys.stderr)
+        return False
+
+    out_dir = dest_dir if dest_dir else archive_path.parent
+
+    print(f"📦 Descomprimiendo: {archive_path.name} -> {out_dir}")
+    try:
+        result_path = extract_archive(archive_path, out_dir)
+    except Exception as exc:
+        print(f"❌ Error al descomprimir: {exc}", file=sys.stderr)
+        notify_user("Error de descompresión", str(exc), is_quiet=quiet)
+        return False
+
+    trash_msg = ""
+    if not keep_original:
+        trashed = move_to_trash(archive_path)
+        if trashed:
+            trash_msg = " Original enviado a la Papelera."
+            print(f"  🗑️  Archivo original movido a la Papelera: {archive_path.name}")
+        else:
+            print(f"  ⚠️ No se pudo mover a la papelera: {archive_path.name}", file=sys.stderr)
+
+    notify_user(
+        "Descompresión completada",
+        f"'{archive_path.name}' extraído con éxito.{trash_msg}",
+        open_path=result_path,
+        is_quiet=quiet
+    )
+
+    if open_after:
+        try:
+            subprocess.Popen(["xdg-open", str(result_path)])
+        except Exception:
+            pass
+
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="kunpack: Descompresión inteligente y auto-limpieza para KDE Plasma 6"
+    )
+    parser.add_argument("archives", nargs="+", type=Path, help="Archivo(s) comprimido(s) a extraer")
+    parser.add_argument("-k", "--keep", action="store_true", help="Conservar el archivo original (no enviar a papelera)")
+    parser.add_argument("-o", "--dest", type=Path, default=None, help="Directorio de destino personalizado")
+    parser.add_argument("-O", "--open", action="store_true", help="Abrir la carpeta resultante en el explorador")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Modo silencioso (sin notificaciones de escritorio)")
+    parser.add_argument("-v", "--version", action="version", version=f"kunpack {VERSION}")
+
+    args = parser.parse_args()
+
+    success_count = 0
+    for archive in args.archives:
+        if unpack_file(archive, args.dest, args.keep, args.open, args.quiet):
+            success_count += 1
+
+    if success_count == len(args.archives):
+        sys.exit(0)
+    else:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
